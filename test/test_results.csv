@@ -1,0 +1,2 @@
+model_id,model,truncated_layers,epochs,batch_size,run_time,lr,image_size,rotate_angle,horizontal_flip_prob,gaussian_blur,brightness_contrast_range,normalize,seed,gflops,params,test_acc,test_loss,sensitivity,specificity
+truncated_b0_reduced_layers_0_2025-03-30_17-38,truncated_b0,0,1,32,0.601735516389211,0.001,224,,,,,True,42,0.413867584,4010110.0,80.2110821766715,0.49757275858151884,0.0,1.0

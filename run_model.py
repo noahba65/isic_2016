@@ -10,7 +10,7 @@ from datetime import datetime
 import sys
 import pandas as pd
 from custom_lib.custom_models.basic_nn import NeuralNetwork
-from custom_lib.data_prep import data_transformation_pipeline, data_loader
+from custom_lib.data_prep import data_transformation_pipeline, SkinLesionDataset
 import matplotlib as plt
 import torchvision.models as models
 import time
@@ -18,7 +18,7 @@ import importlib
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from poutyne import ReduceLROnPlateau, Callback
 from thop import profile
-from custom_lib.eval_tools import tb_metrics_generator
+from custom_lib.eval_tools import metrics_generator
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
@@ -26,21 +26,15 @@ from torchvision.datasets import ImageFolder
 from torch.utils.data import DataLoader
 
 
-def plot_tb_cm(y_true, y_pred, tb_class_index, results_dir, fname):
+def plot_cm(y_true, y_pred, results_dir, fname):
     # Convert predictions to class labels if necessary
     y_pred_to_class = np.argmax(y_pred, axis=1)  # Assuming y_pred is the output from the model
     
     # Calculate the confusion matrix
     cm = confusion_matrix(y_true, y_pred_to_class)
 
-    # Determine the class labels based on the provided tb_class_index
-    if tb_class_index == 0:
-        labels = ['TB', 'Normal']
-    else:
-        labels = ['Normal', 'TB']  # Swap labels if TB is the second class (index 1)
-
     # Create the heatmap plot with custom labels
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
     
     plt.savefig(f"{results_dir}/{fname}.png", bbox_inches='tight')
     plt.close()  # Closes the current figure
@@ -115,7 +109,7 @@ def main(args):
                                                    brightness_contrast_range=args.brightness_contrast_range,
                                                    is_train=True)
     
-    val_transform = data_transformation_pipeline(image_size = args.image_size,
+    test_transform = data_transformation_pipeline(image_size = args.image_size,
                                                  center_crop=args.center_crop,     
                                                  normalize=args.normalize,   
                                                  rotate_angle = None,
@@ -125,39 +119,35 @@ def main(args):
                                                  is_train=False)
     
     # Data path
-    data_path = f"{args.data_dir}/{args.data_folder}"
+    train_path = f"{args.data_dir}/{args.data_folder}/train"
+    test_path = f"{args.data_dir}/{args.data_folder}/test"
 
-    # Read in CXR data
-    data = ImageFolder(data_path)
+    train_labels_path = f"{train_path}/labels.csv"
+    test_labels_path = f"{test_path}/labels.csv"
 
-    num_classes = len(data.classes)
+    train_image_path = f"{train_path}/images"
+    test_image_path = f"{test_path}/images"
 
-    # Load training, validation, and testing data
-    train_loader , val_loader, test_loader = data_loader(data_path, 
-                                                        train_transform=train_transform,
-                                                        val_transform=val_transform,
-                                                        seed=args.seed,
-                                                        batch_size=args.batch_size,
-                                                        train_prop=args.train_prop,
-                                                        )
+    # num_classes = len(data.classes)
+
+    train_data = SkinLesionDataset(
+        csv_file=train_labels_path,
+        img_dir=train_image_path,
+        transform=train_transform
+    )
+
+    test_data = SkinLesionDataset(
+        csv_file=test_labels_path,
+        img_dir=test_image_path,
+        transform=test_transform
+    )
+
+    # Split or use directly
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
     
-    # If the user wants to test the model on a totally different dataset after normal training and testing is done, then this chunk
-    # reads in the external dataset 
-    if args.external_data_folder is not None:
-
-        external_data_path = f"{args.data_dir}/{args.external_data_folder}"
-
-        # Apply transformations to dataset
-        external_data = ImageFolder(external_data_path, transform=val_transform)
-
-        # Create DataLoader
-        external_test_loader = DataLoader(
-                        external_data, batch_size=args.batch_size * 2, num_workers=4, pin_memory=True, drop_last=False)
-        
-        # Make sure the internal and the external sets have the same folder structure. If the names are different and it causes
-        # the class folders to be in different orders, then it may not be evaluating the correct classes
-        if data.class_to_idx != external_data.class_to_idx:
-            raise ValueError("Class indexes and labels do not match between the internal and external data sets. Please ensure they are consistent.")
+    test_loader = DataLoader(test_data, batch_size=32 * 2, shuffle=False)
+    
+    num_classes = train_data.data['label'].nunique()
 
     ############################################################################################
     ################ Define Model and set Callbacks ####################
@@ -190,37 +180,19 @@ def main(args):
                         batch_metrics=["accuracy"],
                         device=device
                         )
-
-    # Add the ReduceLROnPlateau callback
-    reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss',  # Monitor validation loss
-        factor=0.1,          # Reduce LR by a factor of 0.1
-        patience=5           # Wait 5 epochs before reducing LR
-
-    )
-    early_stopping = EarlyStopping(monitor = 'val_loss', patience = 10)
-
-
-
-    # Instantiate the callback
-    print_lr_callback = PrintLRSchedulerCallback()
-
-    # Add it to the list of callbacks
-    # callbacks = [reduce_lr, early_stopping, print_lr_callback]
-    callbacks = [reduce_lr, print_lr_callback]
-
+    
     if args.save_logs == True:
         # Callback: Save the best model based on validation accuracy
-        checkpoint = ModelCheckpoint(f"{results_dir}/best_model.pth", monitor='val_loss', mode='min', save_best_only=True)
+        checkpoint = ModelCheckpoint(f"{results_dir}/best_model.pth", monitor='loss', mode='min', save_best_only=True)
         csv_logger = CSVLogger(f"{results_dir}/training_logs.csv")
-        callbacks = [checkpoint, csv_logger, reduce_lr, print_lr_callback]
+        callbacks = [checkpoint, csv_logger]
         
     ############################################################################################
     ################ Train Model ####################
 
     start_time = time.time()
     # 7. Train the model
-    history = poutyne_model.fit_generator(train_loader, val_loader, epochs=args.epochs, verbose=True,
+    history = poutyne_model.fit_generator(train_loader, epochs=args.epochs, verbose=True,
                                 callbacks = callbacks)
     end_time = time.time()
 
@@ -249,59 +221,20 @@ def main(args):
                                                                            return_pred=True, 
                                                                            return_ground_truth=True)
 
-    print("Starting TB specificity and sensitivity evaluation")
+    print("Starting specificity and sensitivity evaluation")
     
-    # The evaluation function select the TB index, this line will print an error if the passed (or default) TB folder name
-    # argument is not found in the data
-    if args.tb_folder_name not in data.class_to_idx:
-        raise ValueError(f"Error: '{args.tb_folder_name}' is not a valid class name. Available options are: {list(data.class_to_idx.keys())}")
 
-    # Extract TB index to ensure TB metrics generator and the confusion matrix are both calculated correctly
-    tb_class_index = data.class_to_idx[args.tb_folder_name]
+    sen, spec = metrics_generator(y_pred=y_pred, y_true=y_true)
 
-
-    tb_sen, tb_spec = tb_metrics_generator(y_pred=y_pred, y_true=y_true, tb_class_index=tb_class_index)
-
-    print("Internal TB Sensitivity: ", tb_sen)
-    print("Internal TB Specificity: ", tb_spec)
+    print("Sensitivity: ", sen)
+    print("Specificity: ", spec)
 
     # Plot and save confusion matrix
     if args.save_logs:
-        plot_tb_cm(y_true=y_true, y_pred=y_pred, tb_class_index=tb_class_index, 
+        plot_cm(y_true=y_true, y_pred=y_pred, 
                    results_dir=results_dir, fname = "confusion_matrix")
 
 
-    ############################################################################################
-    ################ Testing model on external data if selected ####################    
-
-    # Since the external results are a column in the test results csv, these need to be intialized
-    # as `None` so that we do not cause an error when saving the results
-    test_acc_external = None
-    test_loss_external = None
-    tb_sen_external = None
-    tb_spec_external = None
-    
-    if args.external_data_folder is not None:
-
-        print("Starting external test evalution")
-
-        # Evaluate using Poutyne
-        test_loss_external, test_acc_external, y_pred_external, y_true_external = poutyne_model.evaluate_generator(
-                                                                            external_test_loader, 
-                                                                            return_pred=True, 
-                                                                            return_ground_truth=True)
-
-        print("Starting TB specificity and sensitivity evaluation") 
-
-        tb_sen_external, tb_spec_external = tb_metrics_generator(y_pred=y_pred_external, y_true=y_true_external, tb_class_index=tb_class_index)
-
-        print("External TB Sensitivity: ", tb_sen_external)
-        print("Exteranl TB Specificity: ", tb_spec_external)
-
-        # Plot and save confusion matrix
-        if args.save_logs:
-            plot_tb_cm(y_true=y_true_external, y_pred=y_pred_external, tb_class_index=tb_class_index, 
-                       results_dir=results_dir, fname = "confusion_matrix_external")
 
     ##########################################################################################
 
@@ -342,17 +275,10 @@ def main(args):
             "seed": [args.seed],
             "gflops": [gflops],
             "params": [params],
-            "single_test_acc": [test_acc],
-            "single_test_loss": [test_loss],
-            "external_test_acc": [test_acc_external],
-            "external_test_loss": [test_loss_external],
-            "internal_TB_val_sensitivity": [tb_sen],
-            "internal__TB_val_specificity": [tb_spec],
-            "external_TB_val_sensitivity": [tb_sen_external],
-            "external_TB_val_specificity": [tb_spec_external],
-            "train_prop": [args.train_prop],
-            "internal_data": [args.data_folder],
-            "external_data": [args.external_data_folder]
+            "test_acc": [test_acc],
+            "test_loss": [test_loss],
+            "sensitivity": [sen],
+            "specificity": [spec],
             })
 
 
@@ -381,8 +307,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a truncated EfficientNet model.")
     parser.add_argument("--data_dir", type=str, help="Directory containing the dataset.")
     parser.add_argument("--data_folder", type=str, help="Name of CXR data folder")
-    parser.add_argument("--external_data_folder", default=None, type=str, help="Folder containing an external test dataset.")
-    parser.add_argument("--tb_folder_name", default='TB', type=str, help="The name of the TB folder in the internal and or external dataset.")
     parser.add_argument("--model_name", type=str, choices=["truncated_b0", "truncated_b0_act1", "truncated_b0_leaky", "truncated_b0_leaky2"], help="Custom model found in custom_lib.custom_models.")
     parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
@@ -405,7 +329,6 @@ if __name__ == "__main__":
     parser.add_argument("--save_logs", action="store_true", help="Save logs and outputs.")
     parser.add_argument("--image_size", type=int, default=224, help="Size of image for resize in data transform")
     parser.add_argument("--center_crop", type = int, default=224, help="Centercrop of image in data transform")
-    parser.add_argument("--train_prop", type=float, default=.8, help="What proportion to split training data on.")
     parser.add_argument("--dropout_p", type=float, default=.2, help="The probablity for the dropout in classifier layer.")
 
 

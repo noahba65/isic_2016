@@ -98,7 +98,7 @@ def bootstrap_evaluation_poutyne(model, data, save_logs, n_bootstraps, seed,
     return results_df
 
 
-def tb_metrics_generator(y_pred, y_true, tb_class_index):
+def metrics_generator(y_pred, y_true):
     """
     Generate sensitivity and specificity for the TB class, given the predicted and true labels.
 
@@ -118,13 +118,8 @@ def tb_metrics_generator(y_pred, y_true, tb_class_index):
     # Compute confusion matrix
     cm = confusion_matrix(y_true, y_pred_to_class)
 
-    # Define indices for the classes
-    if tb_class_index == 0:
-        # TB is the first class (index 0)
-        tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
-    else:
-        # TB is the second class (index 1)
-        tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
+
+    tn, fp, fn, tp = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
 
     # Calculate TB sensitivity (Recall)
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0  # Avoid division by zero

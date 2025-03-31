@@ -4,7 +4,33 @@ from torchvision import datasets, transforms
 from torchvision.transforms import Compose, RandomRotation, RandomHorizontalFlip, Resize, CenterCrop, ToTensor, Normalize, GaussianBlur, ColorJitter
 from torchvision.datasets import ImageFolder
 from torch.utils.data import DataLoader, ConcatDataset, Subset
-from sklearn.model_selection import train_test_split
+import os
+import pandas as pd
+from PIL import Image
+from torch.utils.data import Dataset
+
+class SkinLesionDataset(Dataset):
+    def __init__(self, csv_file, img_dir, transform=None):
+        self.data = pd.read_csv(csv_file)
+        self.img_dir = os.path.expanduser(img_dir)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        image_id = row['image_id']
+        label = int(row['label'])
+
+        # Construct full image path
+        img_path = os.path.join(self.img_dir, f"{image_id}.jpg")
+        image = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 def data_transformation_pipeline(
     image_size,
@@ -60,57 +86,3 @@ def data_transformation_pipeline(
     return Compose(transform_steps)
 
 
-def data_loader(data_path, train_transform, val_transform, train_prop, batch_size, seed):
-    """
-    Function to load the train, validation, and test datasets with appropriate transformations
-    and return DataLoader objects for each.
-
-    Parameters:
-    - data_path (str): Path to the dataset directory containing the images organized in subdirectories by class.
-    - train_transform (torchvision.transforms.Compose): Transformations to be applied to the training data (e.g., augmentation).
-    - val_transform (torchvision.transforms.Compose): Transformations to be applied to the validation and test data.
-    - train_prop (float): Proportion of the dataset to be used for training (e.g., 0.7 for 70% training data).
-    - batch_size (int): The batch size to be used in the DataLoader for loading data in mini-batches.
-
-    Returns:
-    - train_loader (DataLoader): DataLoader object for the training set.
-    - val_loader (DataLoader): DataLoader object for the validation set.
-    - test_loader (DataLoader): DataLoader object for the test set.
-
-    The DataLoader objects are created using `SubsetRandomSampler` based on the stratified splits
-    of the dataset to ensure balanced class distribution across train, validation, and test sets.
-    """
-
-    torch.manual_seed(seed)  # For PyTorch
-
-    # Load full dataset without transform (we'll assign it later)
-    full_dataset = datasets.ImageFolder(root=data_path)
-    
-    # Create indices to represent all the samples in the dataset
-    num_samples = len(full_dataset)
-    indices = torch.arange(num_samples)
-
-    # Extract class labels for stratification to ensure balanced splits
-    class_labels = [full_dataset.targets[i] for i in indices]
-
-    # Split indices into train, validation, and test sets (stratified sampling)
-    # Train set will be of size `train_prop` (e.g., 0.7)
-    train_indices, temp_indices = train_test_split(indices, train_size=train_prop, random_state=seed, stratify=class_labels)
-    
-    # The remaining `temp_indices` are split into validation and test sets with 50% for each
-    val_indices, test_indices = train_test_split(temp_indices, train_size=0.5, random_state=seed, stratify=[class_labels[i] for i in temp_indices])
-
-    # Create separate datasets with appropriate transformations for each set
-    train_dataset = datasets.ImageFolder(root=data_path, transform=train_transform)
-    val_dataset = datasets.ImageFolder(root=data_path, transform=val_transform)
-    test_dataset = datasets.ImageFolder(root=data_path, transform=val_transform)
-
-    # Create DataLoaders using `SubsetRandomSampler`
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=SubsetRandomSampler(train_indices))
-    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, sampler=SubsetRandomSampler(val_indices))
-    test_loader = DataLoader(test_dataset, batch_size=batch_size * 2, sampler=SubsetRandomSampler(test_indices))
-
-    # Print the sizes of each dataset
-    print(f"Train size {len(train_indices)}. Val size {len(val_indices)}. Test size {len(test_indices)}.")
-
-    return train_loader, val_loader, test_loader
